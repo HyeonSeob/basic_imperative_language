@@ -1,7 +1,7 @@
 // P ::= D ; C
 // E ::= N | ( E1 + E2 ) | L | (E1 == E2) | not E | new T | nil
-// C ::= L = E | if E { C1 } else { C2 } | print L | C1 ; C2 | while E { C }
-// D :: var I = E | D1 ; D2
+// C ::= L = E | if E { C1 } else { C2 } | print L | C1 ; C2 | while E { C } | L()
+// D :: var I = E | D1 ; D2 | proc I() { C }
 // T :: struct D end | array[N] of E
 // L ::= I | L . I | L[E]
 // N ::= string of digits
@@ -14,6 +14,7 @@ trait OpTree {
   case class While(e: Etree, cs1: Ctree) extends Ctree
   case class Print(l: Ltree) extends Ctree
   case class Seq(cl: List[Ctree]) extends Ctree
+  case class Func(l: Ltree) extends Ctree
 
   sealed abstract class Etree
   case class Num(s: String) extends Etree
@@ -33,6 +34,7 @@ trait OpTree {
   sealed abstract class Dtree
   case class Dec(x: String, e: Etree) extends Dtree
   case class Dseq(dl: List[Dtree]) extends Dtree
+  case class Proc(x: String, cl: List[Ctree]) extends Dtree
 
   sealed abstract class Ttree
   case class St(d: Dtree) extends Ttree
@@ -58,17 +60,16 @@ object oocore extends JavaTokenParsers with OpTree {
 
   def coms: Parser[Ctree] = rep1sep(comm, ";") ^^ { case cl => Seq(cl) }
   def comm: Parser[Ctree] =
-    lefts ~ ("=" ~> expr) ^^
-      { case l ~ e => Assign(l, e) } |
-      ("if" ~> expr <~ "{") ~ (coms<~"}" <~ "else") ~ ("{"~>coms <~ "}") ^^
-      { case e ~ cs1 ~ cs2 => Cond(e, cs1, cs2) } |
-      ("while" ~> expr <~ "{") ~ coms <~ "}" ^^
-      { case e ~ cs1 => While(e, cs1) } |
-      "print" ~> lefts ^^ (Print(_))
+    lefts ~ ("=" ~> expr) ^^ { case l ~ e => Assign(l, e) } |
+    ("if" ~> expr <~ "{") ~ (coms<~"}" <~ "else") ~ ("{"~>coms <~ "}") ^^ { case e ~ cs1 ~ cs2 => Cond(e, cs1, cs2) } |
+    ("while" ~> expr <~ "{") ~ coms <~ "}" ^^ { case e ~ cs1 => While(e, cs1) } |
+    "print" ~> lefts ^^ (Print(_)) |
+    lefts <~ "()" ^^ (Func(_))
 
   def defns: Parser[Dtree] = rep1sep(defn, ";") ^^ { case dl => Dseq(dl) }
   def defn: Parser[Dtree] =
-    ("var" ~> ident) ~ ("=" ~> expr) ^^ { case i ~ e => Dec(i, e) }
+    ("var" ~> ident) ~ ("=" ~> expr) ^^ { case i ~ e => Dec(i, e) } |
+    ("proc" ~> ident <~ "()" ) ~ ( "{" ~> commlist <~ "}") ^^ { case i ~ cl => Proc(i, cl) } 
 
   def expr: Parser[Etree] =
     wholeNumber ^^ (Num(_)) |
@@ -113,6 +114,7 @@ object oocore extends JavaTokenParsers with OpTree {
   sealed abstract class Mem
   case class Namespace(c: Map[String, Rval]) extends Mem
   case class M_Array(n: scala.collection.mutable.ArrayBuffer[Rval]) extends Mem
+  case class Closure(cl: List[Ctree], p: Rval) extends Mem
 
   var heap: Map[Handle, Mem] = Map()
 
@@ -170,8 +172,8 @@ object oocore extends JavaTokenParsers with OpTree {
       }
     }
   }
+  
   // Interpreter
-
   def interpretPTREE(p: (Dtree, Ctree)): Unit = {
     val (d, c) = p
     interpretDTREE(d)
@@ -179,19 +181,23 @@ object oocore extends JavaTokenParsers with OpTree {
   }
 
   def interpretDTREE(d: Dtree): Unit = d match {
-    case Dec(x, e) => {
-      store((ns.head, x, -1), interpretETREE(e))
-    }
+    case Dec(x, e) => store((ns.head, x, -1), interpretETREE(e))
     case Dseq(ds) => for (d <- ds) interpretDTREE(d)
+    
+    // Procedure
+    case Proc(x, cl) => {
+       val newhandle = Handle(heap.size)
+       val p = if (ns == List()) Handle(-1) else ns.head
+       heap += (newhandle -> Closure(cl, p))
+       store((ns.head, x, -1), newhandle)
+    }
   }
   
   def interpretTTREE(t: Ttree): Unit = t match {
     case St(d) =>
-      //write the code
       interpretDTREE(d)
       
     case Ar(n, e) =>
-      //write the code
       val array = new scala.collection.mutable.ArrayBuffer[Rval]
       for(i <- 1 to n)
         array.append(interpretETREE(e))
@@ -224,6 +230,27 @@ object oocore extends JavaTokenParsers with OpTree {
       println(lookup(interpretLTREE(l,ns.head)))
     }
     case Seq(cs) => for (c <- cs) yield interpretCTREE(c)
+    
+    //procedure
+    case Func(l) => {
+      var (handle, x, _) = interpretLTREE(l, ns.head)
+      lookup(handle,x,-1) match {
+        case Handle(h) =>
+          {
+            heap(Handle(h)) match {
+              case Closure(cl, p) => {
+                val newhandle = Handle(heap.size)
+                heap += (newhandle -> Namespace(Map("parents" -> p)))
+                ns = List(newhandle) ++ ns;
+                interpretCLIST(cl)
+                ns = ns.tail;
+                }
+              case _ => throw new Exception(x+" is not procedure")
+            }
+          }
+        case _ => throw new Exception
+      }
+    }
   }
 
   def interpretETREE(e: Etree): Rval = e match {
@@ -267,7 +294,6 @@ object oocore extends JavaTokenParsers with OpTree {
       lookup(interpretLTREE(l,ns.head))
     }
     case New(t) => {
-      //write the code
       val handle = allocateNS()
       ns = List(handle) ++ ns
       interpretTTREE(t)
@@ -282,7 +308,6 @@ object oocore extends JavaTokenParsers with OpTree {
         (find(han1, x), x, -1)
       }
       case Dot(ls, l1) => {
-        //write the code
         val (han2, x1, i1) = interpretLTREE(ls, han1) 
         lookup(han2, x1, i1) match {
           case Handle(h) =>
@@ -292,13 +317,15 @@ object oocore extends JavaTokenParsers with OpTree {
               case Namespace(m) =>
                 if(m contains x2) (han3, x2, i2)
                 else throw new Exception("Not member " + x2)
+                
+              // procedure
+              case Closure(cl, p) => (han3, x2, i2)
             }
           case Value(n) => throw new Exception("")
           case Nil => throw new Exception("")
         }
       }
       case Arr(l, e) => {
-        //write the code
         val (han2, x, i) = interpretLTREE(l, han1)
         lookup((han2, x, i)) match {
           case Handle(h) => (Handle(h), x, interpretETREE(e) match {
@@ -325,48 +352,3 @@ object oocore extends JavaTokenParsers with OpTree {
     } catch { case e: Exception => println(e) }
   }
 }
-
-//example 1 (0.5point)
-//input : var x =3; var z = new struct var f =0; var g = 1 end; var r = new array[4] of 0;r[3]=100;print r[3]
-//optree : (Dseq(List(Dec(x,Num(3)), Dec(z,New(St(Dseq(List(Dec(f,Num(0)), Dec(g,Num(1))))))), Dec(r,New(Ar(4,Num(0)))))),Seq(List(Assign(Arr(Id(r),Num(3)),Num(100)), Print(Arr(Id(r),Num(3))))))
-//Value(100)
-//namespace : List(Handle(0))
-//heap : Map(Handle(0) -> Namespace(Map(parents -> Handle(-1), x -> Value(3), z -> Handle(1), r -> Handle(2))), Handle(1) -> Namespace(Map(parents -> Handle(0), f -> Value(0), g -> Value(1))), Handle(2) -> M_Array(ArrayBuffer(Value(0), Value(0), Value(0), Value(100))))
-
-//example 2 (0.5point)
-//input : var x =3; var z = new struct var f =0; var g = 1 end; var r = new array[4] of 0;z.x=30
-//optree : (Dseq(List(Dec(x,Num(3)), Dec(z,New(St(Dseq(List(Dec(f,Num(0)), Dec(g,Num(1))))))), Dec(r,New(Ar(4,Num(0)))))),Seq(List(Assign(Dot(Id(z),Id(x)),Num(30)))))
-//java.lang.Exception: Not member x
-
-//example 3 (0.5point)
-//input : var x = 7;var y = new array[4] of new array[4] of 3;y[3][3]=120;print y[3][3]
-//optree : (Dseq(List(Dec(x,Num(7)), Dec(y,New(Ar(4,New(Ar(4,Num(3)))))))),Seq(List(Assign(Arr(Arr(Id(y),Num(3)),Num(3)),Num(120)), Print(Arr(Arr(Id(y),Num(3)),Num(3))))))
-//Value(120)
-//namespace : List(Handle(0))
-//heap : Map(Handle(0) -> Namespace(Map(parents -> Handle(-1), x -> Value(7), y -> Handle(1))), Handle(4) -> M_Array(ArrayBuffer(Value(3), Value(3), Value(3), Value(3))), Handle(1) -> M_Array(ArrayBuffer(Handle(2), Handle(3), Handle(4), Handle(5))), Handle(3) -> M_Array(ArrayBuffer(Value(3), Value(3), Value(3), Value(3))), Handle(5) -> M_Array(ArrayBuffer(Value(3), Value(3), Value(3), Value(120))), Handle(2) -> M_Array(ArrayBuffer(Value(3), Value(3), Value(3), Value(3))))
-
-//example 4 (0.5point)
-//input : var x =3; var z = new struct var f =0; var g = 1 end; var r = new array[4] of 0;if not (z.g == z.f) { print z.f} else {print x}
-//optree : (Dseq(List(Dec(x,Num(3)), Dec(z,New(St(Dseq(List(Dec(f,Num(0)), Dec(g,Num(1))))))), Dec(r,New(Ar(4,Num(0)))))),Seq(List(Cond(Not(Bop(Deref(Dot(Id(z),Id(g))),Deref(Dot(Id(z),Id(f))))),Seq(List(Print(Dot(Id(z),Id(f))))),Seq(List(Print(Id(x))))))))
-//Value(0)
-//namespace : List(Handle(0))
-//heap : Map(Handle(0) -> Namespace(Map(parents -> Handle(-1), x -> Value(3), z -> Handle(1), r -> Handle(2))), Handle(1) -> Namespace(Map(parents -> Handle(0), f -> Value(0), g -> Value(1))), Handle(2) -> M_Array(ArrayBuffer(Value(0), Value(0), Value(0), Value(0))))
-
-//example 5 (1point)
-//input : var x = 7;var y = new array[4] of new struct var a=10 end;y[3].a = 100
-//optree : (Dseq(List(Dec(x,Num(7)), Dec(y,New(Ar(4,New(St(Dseq(List(Dec(a,Num(10))))))))))),Seq(List(Assign(Dot(Arr(Id(y),Num(3)),Id(a)),Num(100)))))
-//namespace : List(Handle(0))
-//heap : ? ? ?
-
-//example 6 (1point)
-//input : var x =3; var z = new struct var y = new array [3] of new struct var a =10 end end;z.y[1].a=100; print z.y[0].a
-//optree : (Dseq(List(Dec(x,Num(3)), Dec(z,New(St(Dseq(List(Dec(y,New(Ar(3,New(St(Dseq(List(Dec(a,Num(10)))))))))))))))),Seq(List(Assign(Dot(Dot(Id(z),Arr(Id(y),Num(1))),Id(a)),Num(100)), Print(Dot(Dot(Id(z),Arr(Id(y),Num(0))),Id(a))))))
-//Value(10)
-//namespace : List(Handle(0))
-//heap : ? ? ?
-
-//example 7 (1point)
-//input : var x = 1;var y = new array[2] of new array[2] of new array[2] of new struct var a=x end;y[1][(x-1)][1].a = 100
-//optree : (Dseq(List(Dec(x,Num(1)), Dec(y,New(Ar(2,New(Ar(2,New(Ar(2,New(St(Dseq(List(Dec(a,Deref(Id(x)))))))))))))))),Seq(List(Assign(Dot(Arr(Arr(Arr(Id(y),Num(1)),Sub(Deref(Id(x)),Num(1))),Num(1)),Id(a)),Num(100)))))
-//namespace : List(Handle(0))
-//heap : ? ? ?
