@@ -35,10 +35,12 @@ trait OpTree {
   case class Dec(x: String, e: Etree) extends Dtree
   case class Dseq(dl: List[Dtree]) extends Dtree
   case class Proc(x: String, cl: List[Ctree]) extends Dtree
+  case class Tclass(x: String, t: Ttree) extends Dtree
 
   sealed abstract class Ttree
   case class St(d: Dtree) extends Ttree
   case class Ar(n: Int, e: Etree) extends Ttree
+  case class Cl(l: Ltree) extends Ttree
 }
 
 import scala.util.parsing.combinator.JavaTokenParsers
@@ -69,7 +71,8 @@ object oocore extends JavaTokenParsers with OpTree {
   def defns: Parser[Dtree] = rep1sep(defn, ";") ^^ { case dl => Dseq(dl) }
   def defn: Parser[Dtree] =
     ("var" ~> ident) ~ ("=" ~> expr) ^^ { case i ~ e => Dec(i, e) } |
-    ("proc" ~> ident <~ "()" ) ~ ( "{" ~> commlist <~ "}") ^^ { case i ~ cl => Proc(i, cl) } 
+    ("proc" ~> ident <~ "()" ) ~ ( "{" ~> commlist <~ "}") ^^ { case i ~ cl => Proc(i, cl) } |
+    ("class" ~> ident) ~ ("=" ~> templ) ^^ { case i ~ t => Tclass(i, t) }
 
   def expr: Parser[Etree] =
     wholeNumber ^^ (Num(_)) |
@@ -85,8 +88,8 @@ object oocore extends JavaTokenParsers with OpTree {
 
   def templ: Parser[Ttree] =
     "struct" ~> defns <~ "end" ^^ (St(_)) |
-      ("array" ~> "[" ~> wholeNumber <~ "]") ~ ("of" ~> expr) ^^
-      { case n ~ e => Ar(n.toInt, e) }
+    ("array" ~> "[" ~> wholeNumber <~ "]") ~ ("of" ~> expr) ^^ { case n ~ e => Ar(n.toInt, e) } |
+    lefts ^^ (Cl(_))
 
   def le: Parser[Ltree] =
     ident ~ rep("[" ~> expr <~ "]") ^^ {
@@ -114,7 +117,8 @@ object oocore extends JavaTokenParsers with OpTree {
   sealed abstract class Mem
   case class Namespace(c: Map[String, Rval]) extends Mem
   case class M_Array(n: scala.collection.mutable.ArrayBuffer[Rval]) extends Mem
-  case class Closure(cl: List[Ctree], p: Rval) extends Mem
+  case class Closure(cl: List[Ctree], p: Rval) extends Mem 
+  case class TClosure(t: Ttree, p: Rval) extends Mem
 
   var heap: Map[Handle, Mem] = Map()
 
@@ -142,6 +146,7 @@ object oocore extends JavaTokenParsers with OpTree {
         else
           throw new Exception("lookup error: "+handle+ " Not contains "+ fieldname)
       case M_Array(a) => a(i)
+      case _ => throw new Exception
     }
   }
 
@@ -157,6 +162,7 @@ object oocore extends JavaTokenParsers with OpTree {
           a(i) = rval
           heap += (handle -> M_Array(a))
       }
+      case _ => throw new Exception
     }
   }
 
@@ -191,17 +197,40 @@ object oocore extends JavaTokenParsers with OpTree {
        heap += (newhandle -> Closure(cl, p))
        store((ns.head, x, -1), newhandle)
     }
+    
+    // Class
+    case Tclass(x, t) => {
+      val newhandle = Handle(heap.size)
+      val p = if(ns == List()) Handle(-1) else ns.head
+      heap += (newhandle -> TClosure(t, p))
+      store((ns.head, x, -1), newhandle)
+    }
   }
   
   def interpretTTREE(t: Ttree): Unit = t match {
     case St(d) =>
       interpretDTREE(d)
       
-    case Ar(n, e) =>
+    case Ar(n, e) => {
       val array = new scala.collection.mutable.ArrayBuffer[Rval]
       for(i <- 1 to n)
         array.append(interpretETREE(e))
       heap += (ns.head -> M_Array(array))
+    }
+    
+    // Class
+    case Cl(l) => {
+      var (handle, x, _) = interpretLTREE(l, ns.head)
+      lookup(handle,x,-1) match {
+        case Handle(h) => {
+           heap(Handle(h)) match {
+              case TClosure(t, p) => interpretTTREE(t)
+              case _ => throw new Exception(x+" is not class")
+           }
+        }
+        case _ => throw new Exception
+      }
+    } 
   }
   
   def interpretCLIST(cs: List[Ctree]): Unit =
@@ -231,7 +260,7 @@ object oocore extends JavaTokenParsers with OpTree {
     }
     case Seq(cs) => for (c <- cs) yield interpretCTREE(c)
     
-    //procedure
+    // Procedure
     case Func(l) => {
       var (handle, x, _) = interpretLTREE(l, ns.head)
       lookup(handle,x,-1) match {
@@ -251,6 +280,8 @@ object oocore extends JavaTokenParsers with OpTree {
         case _ => throw new Exception
       }
     }
+    
+    
   }
 
   def interpretETREE(e: Etree): Rval = e match {
@@ -318,8 +349,9 @@ object oocore extends JavaTokenParsers with OpTree {
                 if(m contains x2) (han3, x2, i2)
                 else throw new Exception("Not member " + x2)
                 
-              // procedure
-              case Closure(cl, p) => (han3, x2, i2)
+              // Procedure & Class
+              case Closure(_,_) => (han3, x2, i2)
+              case TClosure(_,_) => (han3, x2, i2)
             }
           case Value(n) => throw new Exception("")
           case Nil => throw new Exception("")
