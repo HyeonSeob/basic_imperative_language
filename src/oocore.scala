@@ -36,6 +36,8 @@ trait OpTree {
   case class Dseq(dl: List[Dtree]) extends Dtree
   case class Proc(x: String, cl: List[Ctree]) extends Dtree
   case class Tclass(x: String, t: Ttree) extends Dtree
+  case class Module(x: String, dl: Dtree) extends Dtree
+  case class Import(l: Ltree) extends Dtree
 
   sealed abstract class Ttree
   case class St(d: Dtree) extends Ttree
@@ -72,7 +74,9 @@ object oocore extends JavaTokenParsers with OpTree {
   def defn: Parser[Dtree] =
     ("var" ~> ident) ~ ("=" ~> expr) ^^ { case i ~ e => Dec(i, e) } |
     ("proc" ~> ident <~ "()" ) ~ ( "{" ~> commlist <~ "}") ^^ { case i ~ cl => Proc(i, cl) } |
-    ("class" ~> ident) ~ ("=" ~> templ) ^^ { case i ~ t => Tclass(i, t) }
+    ("class" ~> ident) ~ ("=" ~> templ) ^^ { case i ~ t => Tclass(i, t) } |
+    ("module" ~> ident) ~ ("=" ~> defns <~ "end") ^^ { case i ~ dl => Module(i, dl)} |
+    ("import" ~> le) ^^ { case l => Import(l)}
 
   def expr: Parser[Etree] =
     wholeNumber ^^ (Num(_)) |
@@ -119,6 +123,7 @@ object oocore extends JavaTokenParsers with OpTree {
   case class M_Array(n: scala.collection.mutable.ArrayBuffer[Rval]) extends Mem
   case class Closure(cl: List[Ctree], p: Rval) extends Mem 
   case class TClosure(t: Ttree, p: Rval) extends Mem
+  case class MClosure(dl: Dtree, p: Rval) extends Mem
 
   var heap: Map[Handle, Mem] = Map()
 
@@ -205,6 +210,26 @@ object oocore extends JavaTokenParsers with OpTree {
       heap += (newhandle -> TClosure(t, p))
       store((ns.head, x, -1), newhandle)
     }
+    
+    // Module
+    case Module(x, dl) => {
+      val newhandle = Handle(heap.size)
+      val p = if(ns == List()) Handle(-1) else ns.head
+      heap += (newhandle -> MClosure(dl, p))
+      store((ns.head, x, -1), newhandle)
+    }
+    case Import(l) => {
+      var (handle, x, _) = interpretLTREE(l, ns.head)
+      lookup(handle,x,-1) match {
+        case Handle(h) => {
+           heap(Handle(h)) match {
+              case MClosure(dl, p) => interpretDTREE(dl)
+              case _ => throw new Exception(x+" is not module")
+           }
+        }
+        case _ => throw new Exception(x+" is not module")
+      }
+    } 
   }
   
   def interpretTTREE(t: Ttree): Unit = t match {
@@ -228,7 +253,7 @@ object oocore extends JavaTokenParsers with OpTree {
               case _ => throw new Exception(x+" is not class")
            }
         }
-        case _ => throw new Exception
+        case _ => throw new Exception(x+" is not class")
       }
     } 
   }
@@ -277,7 +302,7 @@ object oocore extends JavaTokenParsers with OpTree {
               case _ => throw new Exception(x+" is not procedure")
             }
           }
-        case _ => throw new Exception
+        case _ => throw new Exception(x+" is not procedure")
       }
     }
     
